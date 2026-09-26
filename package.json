@@ -1,0 +1,17 @@
+{
+  "name": "activation-ticket-queue-bot",
+  "version": "1.0.0",
+  "description": "بوت ديسكورد لنظام طابور/تذاكر التفعيل مع جدولة أسبوعية وحد أقصى للتكتات",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node deploy-commands.js && node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.7.0",
+    "node-cron": "^3.0.3"
+  }
+}
