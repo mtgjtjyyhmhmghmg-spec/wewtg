@@ -12,6 +12,7 @@ const { buildTicketButtons } = require('../utils/buttons');
 const { refreshPanel, deletePanelMessage } = require('../utils/panel');
 const { performTicketClose } = require('../utils/ticketClose');
 const { incrementClaimStat } = require('../utils/stats');
+const { enqueue, withRetry } = require('../utils/channelQueue');
 
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID;
@@ -106,12 +107,35 @@ module.exports = {
           });
         }
 
-        const ticketChannel = await guild.channels.create({
-          name: `تفعيل-${ticket.ticketNumber}`,
-          type: ChannelType.GuildText,
-          parent: TICKET_CATEGORY_ID || undefined,
-          permissionOverwrites: overwrites,
-        });
+        // إنشاء الروم يمر عبر طابور متسلسل + إعادة محاولة — عشان لو صار ضغط عالي
+        // (عشرات التذاكر بنفس الوقت) ما نصطدم بحد ديسكورد لعدد الرومات المنشأة
+        // بفترة قصيرة، وما تضيع تذاكر بدون رومات.
+        let ticketChannel;
+        try {
+          ticketChannel = await enqueue(() =>
+            withRetry(
+              () =>
+                guild.channels.create({
+                  name: `تفعيل-${ticket.ticketNumber}`,
+                  type: ChannelType.GuildText,
+                  parent: TICKET_CATEGORY_ID || undefined,
+                  permissionOverwrites: overwrites,
+                }),
+              { attempts: 4, baseDelayMs: 2000, label: `إنشاء روم تذكرة #${ticket.ticketNumber}` }
+            )
+          );
+        } catch (channelErr) {
+          // فشل نهائي بعد كل المحاولات — نتراجع عن التذكرة كاملة عشان رقمها ما يضل
+          // محجوز بدون روم، والعضو يقدر يحاول من جديد فورًا بدل ما يعلق بلا تذكرة ظاهرة.
+          console.error(`❌ فشل نهائي بإنشاء روم التذكرة #${ticket.ticketNumber}:`, channelErr.message);
+          await queue.rollbackFailedTicket(ticket._id);
+          await interaction.editReply({
+            content: '❌ صار ضغط عالي وما قدرنا ننشئ روم تذكرتك. اضغط "فتح تذكرة" مرة ثانية الحين — رقمك ما انحجز.',
+          });
+          const freshPeriod = await queue.getPeriod(period._id);
+          if (freshPeriod) await refreshPanel(interaction.client, freshPeriod);
+          return;
+        }
 
         await queue.setTicketChannel(ticket._id, ticketChannel.id);
         const fresh = await queue.getTicket(ticket._id);
@@ -146,7 +170,11 @@ module.exports = {
         }
       } catch (err) {
         console.error(err);
-        await interaction.editReply({ content: '❌ صار خطأ أثناء إنشاء روم التذكرة. تواصل مع الإدارة.' });
+        try {
+          await interaction.editReply({ content: '❌ صار خطأ أثناء إنشاء روم التذكرة. تواصل مع الإدارة.' });
+        } catch (_) {
+          /* تجاهل */
+        }
       }
       return;
     }
