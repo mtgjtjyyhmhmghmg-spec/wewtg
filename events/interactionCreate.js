@@ -76,20 +76,24 @@ module.exports = {
 
     // ===== زر: فتح تذكرة =====
     if (interaction.customId === 'take_ticket') {
+      // نرد فورًا (أقل من ثانية) قبل أي استعلام قاعدة بيانات — ديسكورد يعطينا 3 ثواني
+      // بالضبط من لحظة الضغط، وتحت ضغط عالي (عشرات الضغطات بنفس اللحظة) قاعدة
+      // البيانات ممكن تتأخر أكثر من كذا، فيفشل التفاعل نهائيًا (Unknown interaction)
+      // قبل حتى ما نحاول نرد. الدرس: ACK أول شي دايمًا، وكل شغل ثقيل بعده بـ editReply.
+      await interaction.deferReply({ ephemeral: true });
+
       const period = await queue.getOpenPeriod();
       if (!period) {
-        return interaction.reply({ content: '❌ التفعيل مقفول حاليًا، أو التكتات اكتمل وجاري إنهاء المتبقي.', ephemeral: true });
+        return interaction.editReply({ content: '❌ التفعيل مقفول حاليًا، أو التكتات اكتمل وجاري إنهاء المتبقي.' });
       }
 
       let issued;
       try {
         issued = await queue.issueTicket({ periodId: period._id, userId: interaction.user.id });
       } catch (err) {
-        return interaction.reply({ content: `❌ ${err.message}`, ephemeral: true });
+        return interaction.editReply({ content: `❌ ${err.message}` });
       }
       const { ticket, becameFull } = issued;
-
-      await interaction.deferReply({ ephemeral: true });
 
       try {
         const guild = interaction.guild;
@@ -114,13 +118,26 @@ module.exports = {
         try {
           ticketChannel = await enqueue(() =>
             withRetry(
-              () =>
-                guild.channels.create({
-                  name: `تفعيل-${ticket.ticketNumber}`,
-                  type: ChannelType.GuildText,
-                  parent: TICKET_CATEGORY_ID || undefined,
-                  permissionOverwrites: overwrites,
-                }),
+              async () => {
+                try {
+                  return await guild.channels.create({
+                    name: `تفعيل-${ticket.ticketNumber}`,
+                    type: ChannelType.GuildText,
+                    parent: TICKET_CATEGORY_ID || undefined,
+                    permissionOverwrites: overwrites,
+                  });
+                } catch (e) {
+                  // كود 30013 = الكاتيجوري وصلت الحد الأقصى (50 روم) — إعادة المحاولة
+                  // ما تفيد بهذا الخطأ تحديدًا (مو مشكلة سرعة/ريت-لمت)، فنوقفها فورًا
+                  // برسالة واضحة بدل ما نضيع وقت بـ4 محاولات بلا فايدة.
+                  if (e.code === 30013) {
+                    const stopErr = new Error('CATEGORY_FULL');
+                    stopErr.stopRetrying = true;
+                    throw stopErr;
+                  }
+                  throw e;
+                }
+              },
               { attempts: 4, baseDelayMs: 2000, label: `إنشاء روم تذكرة #${ticket.ticketNumber}` }
             )
           );
@@ -129,9 +146,20 @@ module.exports = {
           // محجوز بدون روم، والعضو يقدر يحاول من جديد فورًا بدل ما يعلق بلا تذكرة ظاهرة.
           console.error(`❌ فشل نهائي بإنشاء روم التذكرة #${ticket.ticketNumber}:`, channelErr.message);
           await queue.rollbackFailedTicket(ticket._id);
+
+          const isCategoryFull = channelErr.message === 'CATEGORY_FULL';
           await interaction.editReply({
-            content: '❌ صار ضغط عالي وما قدرنا ننشئ روم تذكرتك. اضغط "فتح تذكرة" مرة ثانية الحين — رقمك ما انحجز.',
+            content: isCategoryFull
+              ? '❌ كاتيجوري التذاكر وصلت الحد الأقصى لعدد الرومات (50) بديسكورد. تواصل مع الإدارة لتفريغها أو تغييرها — ما تقدر تفتح تذكرة حاليًا.'
+              : '❌ صار ضغط عالي وما قدرنا ننشئ روم تذكرتك. اضغط "فتح تذكرة" مرة ثانية الحين — رقمك ما انحجز.',
           });
+          if (isCategoryFull) {
+            console.error(
+              `🚨 كاتيجوري التذاكر (${TICKET_CATEGORY_ID}) وصلت حد الـ50 روم بديسكورد. ` +
+                `لازم تحذف رومات تذاكر قديمة أو تشيل TICKET_CATEGORY_ID من المتغيرات.`
+            );
+          }
+
           const freshPeriod = await queue.getPeriod(period._id);
           if (freshPeriod) await refreshPanel(interaction.client, freshPeriod);
           return;
@@ -181,23 +209,29 @@ module.exports = {
 
     // ===== زر: تذكرتي =====
     if (interaction.customId === 'my_ticket') {
+      // نفس مبدأ take_ticket: ACK فورًا قبل أي استعلام، لأن هذا الزر كمان معرّض
+      // لضغط عالي (عشرات الأعضاء يضغطونه بنفس اللحظة عقب فتح التفعيل مباشرة)
+      await interaction.deferReply({ ephemeral: true });
+
       const period = await queue.getCurrentPeriod();
       if (!period) {
-        return interaction.reply({ content: '❌ لا يوجد تفعيل مفتوح حاليًا.', ephemeral: true });
+        return interaction.editReply({ content: '❌ لا يوجد تفعيل مفتوح حاليًا.' });
       }
       const ticket = await queue.getUserOpenTicket(period._id, interaction.user.id);
       const ahead = ticket && ticket.status === 'waiting' ? await queue.getPositionInfo(ticket) : 0;
-      return interaction.reply({ embeds: [buildMyTicketEmbed(ticket, ahead)], ephemeral: true });
+      return interaction.editReply({ embeds: [buildMyTicketEmbed(ticket, ahead)] });
     }
 
     // ===== زر: حالة الطابور =====
     if (interaction.customId === 'queue_status') {
+      await interaction.deferReply({ ephemeral: true });
+
       const period = await queue.getCurrentPeriod();
       if (!period) {
-        return interaction.reply({ content: '❌ لا يوجد تفعيل مفتوح حاليًا.', ephemeral: true });
+        return interaction.editReply({ content: '❌ لا يوجد تفعيل مفتوح حاليًا.' });
       }
       const summary = await queue.getQueueSummary(period._id);
-      return interaction.reply({ embeds: [buildQueueStatusEmbed(period, summary)], ephemeral: true });
+      return interaction.editReply({ embeds: [buildQueueStatusEmbed(period, summary)] });
     }
 
     // ===== زر: استلام (مخصص للإدارة فقط، عملية ذرية بدون أي احتمال تعارض) =====
@@ -206,6 +240,9 @@ module.exports = {
         return interaction.reply({ content: '❌ هذا الزر مخصص للإدارة فقط.', ephemeral: true });
       }
 
+      // ACK فورًا (deferUpdate لأن الرد الأصلي هو تعديل نفس الرسالة) قبل أي استعلام
+      await interaction.deferUpdate();
+
       const ticketId = interaction.customId.split('_')[1];
 
       let ticket;
@@ -213,23 +250,23 @@ module.exports = {
         ticket = await queue.claimTicket(ticketId, interaction.user.id);
       } catch (err) {
         if (err.message === 'NOT_FOUND') {
-          return interaction.reply({ content: '❌ لم يتم العثور على هذه التذكرة.', ephemeral: true });
+          return interaction.followUp({ content: '❌ لم يتم العثور على هذه التذكرة.', ephemeral: true });
         }
         if (err.message === 'ALREADY_CLAIMED') {
-          return interaction.reply({ content: 'ℹ️ هذه التذكرة تم استلامها بالفعل من إداري آخر.', ephemeral: true });
+          return interaction.followUp({ content: 'ℹ️ هذه التذكرة تم استلامها بالفعل من إداري آخر.', ephemeral: true });
         }
         if (err.message.startsWith('BLOCKED:')) {
           const num = err.message.split(':')[1];
-          return interaction.reply({
+          return interaction.followUp({
             content: `⏳ لسا ما وصل دور هذه التذكرة. لازم تُستلم التذكرة **#${num}** أولًا.`,
             ephemeral: true,
           });
         }
         console.error(err);
-        return interaction.reply({ content: '❌ صار خطأ غير متوقع.', ephemeral: true });
+        return interaction.followUp({ content: '❌ صار خطأ غير متوقع.', ephemeral: true });
       }
 
-      await interaction.update({
+      await interaction.editReply({
         embeds: [buildTicketEmbed(ticket)],
         components: buildTicketButtons(ticketId, { claimed: true }),
       });
@@ -284,15 +321,18 @@ module.exports = {
         return interaction.reply({ content: '❌ هذا الزر مخصص للإدارة فقط.', ephemeral: true });
       }
 
+      // ACK فورًا قبل أي استعلام (استلام/إغلاق/استدعاء إدارية مو بزحمة 30 شخص،
+      // لكن نحافظ على نفس المبدأ بكل مكان احتياطًا)
+      await interaction.deferReply();
+
       const ticketId = interaction.customId.split('_')[1];
       const ticket = await queue.getTicket(ticketId);
-      if (!ticket) return interaction.reply({ content: '❌ لم يتم العثور على هذه التذكرة.', ephemeral: true });
+      if (!ticket) return interaction.editReply({ content: '❌ لم يتم العثور على هذه التذكرة.' });
       if (ticket.status === 'closed') {
-        return interaction.reply({ content: 'ℹ️ هذه التذكرة مغلقة بالفعل.', ephemeral: true });
+        return interaction.editReply({ content: 'ℹ️ هذه التذكرة مغلقة بالفعل.' });
       }
 
       const snapshot = await queue.setSummoned(ticketId, interaction.user.id);
-      await interaction.deferReply();
 
       try {
         const member = await interaction.guild.members.fetch(ticket.userId);
