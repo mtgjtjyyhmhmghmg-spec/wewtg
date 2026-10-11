@@ -104,19 +104,17 @@ async function issueTicket({ periodId, userId }) {
 
 /**
  * تراجع عن تذكرة فشل إنشاء روم الديسكورد الخاص فيها نهائيًا (بعد كل محاولات الإعادة).
- * تحذف التذكرة من قاعدة البيانات وتُرجع عداد الفترة خطوة للخلف، عشان رقمها ما يضل
- * محجوز بدون فايدة والعضو يقدر يضغط "فتح تذكرة" من جديد فورًا.
+ * تحذف التذكرة من قاعدة البيانات بس — فقط ودون أي لمس لعداد الفترة (ticketCount).
+ *
+ * ⚠️ مهم: عمدًا ما نرجّع العداد للخلف هنا. لو رجّعناه، تحت الضغط العالي ممكن يصير
+ * تعارض (race) بين هذا التعديل غير المحمي وبين transaction الإصدار الأصلي
+ * (issueTicket)، وهذا بالضبط اللي يسبب فساد بالعداد (يوصل رقم أعلى من الحقيقي
+ * بدون ما يلاحظ أحد، ويخلي الفترة تتقفل تلقائيًا قبل اكتمالها فعليًا).
+ * الأثر الوحيد لهذا القرار: لو فشل إنشاء روم تكت، رقمه "يضيع" ولا يُعاد استخدامه —
+ * تبادل آمن بكثير من فساد العداد.
  */
 async function rollbackFailedTicket(ticketId) {
-  const ticket = await Ticket.findByIdAndDelete(ticketId);
-  if (!ticket) return;
-  const period = await Period.findById(ticket.periodId);
-  if (!period) return;
-  period.ticketCount = Math.max(0, period.ticketCount - 1);
-  if (period.status === 'full' && period.ticketCount < period.maxTickets) {
-    period.status = 'open';
-  }
-  await period.save();
+  await Ticket.findByIdAndDelete(ticketId);
 }
 
 async function setTicketChannel(ticketId, channelId) {
