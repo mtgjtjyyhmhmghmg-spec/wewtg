@@ -30,6 +30,9 @@ async function withRetry(fn, { attempts = 3, baseDelayMs = 1500, label = 'عمل
     } catch (err) {
       lastErr = err;
       console.warn(`⚠️ محاولة ${label} فشلت (${i + 1}/${attempts}):`, err.message);
+      // بعض الأخطاء (زي امتلاء الكاتيجوري) إعادة المحاولة ما تفيد فيها أبدًا —
+      // نوقف فورًا بدل ما نضيع وقت على محاولات محكوم عليها بالفشل سلفًا
+      if (err.stopRetrying) break;
       if (i < attempts - 1) {
         await new Promise((res) => setTimeout(res, baseDelayMs * (i + 1)));
       }
