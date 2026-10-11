@@ -28,11 +28,6 @@ async function closePeriod(periodId) {
   await Period.updateOne({ _id: periodId }, { status: 'closed', closedAt: new Date() });
 }
 
-/** يعلّم الفترة كمكتملة العدد (بدون قفلها نهائيًا — لسا فيه تذاكر يشتغلون عليها) */
-async function markPeriodFull(periodId) {
-  await Period.updateOne({ _id: periodId }, { status: 'full' });
-}
-
 async function setPanelMessage(periodId, messageId) {
   await Period.updateOne({ _id: periodId }, { panelMessageId: messageId });
 }
@@ -105,6 +100,23 @@ async function issueTicket({ periodId, userId }) {
   } finally {
     session.endSession();
   }
+}
+
+/**
+ * تراجع عن تذكرة فشل إنشاء روم الديسكورد الخاص فيها نهائيًا (بعد كل محاولات الإعادة).
+ * تحذف التذكرة من قاعدة البيانات وتُرجع عداد الفترة خطوة للخلف، عشان رقمها ما يضل
+ * محجوز بدون فايدة والعضو يقدر يضغط "فتح تذكرة" من جديد فورًا.
+ */
+async function rollbackFailedTicket(ticketId) {
+  const ticket = await Ticket.findByIdAndDelete(ticketId);
+  if (!ticket) return;
+  const period = await Period.findById(ticket.periodId);
+  if (!period) return;
+  period.ticketCount = Math.max(0, period.ticketCount - 1);
+  if (period.status === 'full' && period.ticketCount < period.maxTickets) {
+    period.status = 'open';
+  }
+  await period.save();
 }
 
 async function setTicketChannel(ticketId, channelId) {
@@ -218,7 +230,6 @@ module.exports = {
   getCurrentPeriod,
   openPeriod,
   closePeriod,
-  markPeriodFull,
   setPanelMessage,
   setCountdownMessage,
   getPeriod,
@@ -226,6 +237,7 @@ module.exports = {
   countOpenTickets,
   getUserOpenTicket,
   issueTicket,
+  rollbackFailedTicket,
   setTicketChannel,
   getTicket,
   getTicketByChannel,
